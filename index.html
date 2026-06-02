@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude Code Session Analyzer</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+    :root {
+      --sb-ink: #0f172a;
+      --sb-ink-2: #334155;
+      --sb-ink-3: #64748b;
+      --sb-ink-4: #94a3b8;
+      --sb-paper: #ffffff;
+      --sb-bg: #f8fafc;
+      --sb-line: #e2e8f0;
+      --sb-line-soft: #f1f5f9;
+      --sb-accent: #3b82f6;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--sb-bg); color: var(--sb-ink); line-height: 1.5; }
+    input:focus, select:focus { outline: 2px solid var(--sb-accent); outline-offset: 1px; }
+    #loading { text-align: center; margin-top: 120px; color: var(--sb-ink-4); font-size: 14px; font-family: sans-serif; }
+    #global-error { display: none; max-width: 640px; margin: 40px auto; padding: 16px; background: #fff5f5; border: 1px solid #fcc; border-radius: 6px; font-family: monospace; font-size: 12px; color: #c00; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div id="global-error"></div>
+  <div id="root"><div id="loading">Loading…</div></div>
+
+  <script>
+    window.onerror = function(msg, src, line, col, err) {
+      var el = document.getElementById('global-error');
+      el.style.display = 'block';
+      el.textContent = 'Error: ' + msg + '\n' + (err && err.stack ? err.stack : '');
+    };
+  </script>
+
+  <script type="text/babel">
+    const { useState, useCallback, useRef } = React;
+
+    // ─── SVG Charts (no external dependency) ─────────────────────────────────
+
+    function RadarChart({ data, size = 260 }) {
+      // data: [{ label, value, max }]
+      const cx = size / 2, cy = size / 2;
+      const r = size * 0.36;
+      const n = data.length;
+      const angleStep = (2 * Math.PI) / n;
+
+      const gridLevels = [2, 4, 6, 8, 10];
+
+      const toXY = (i, val, maxVal = 10) => {
+        const angle = angleStep * i - Math.PI / 2;
+        const scaled = (val / maxVal) * r;
+        return { x: cx + scaled * Math.cos(angle), y: cy + scaled * Math.sin(angle) };
+      };
+
+      const dataPoints = data.map((d, i) => toXY(i, d.value));
+      const polygon = dataPoints.map(p => `${p.x},${p.y}`).join(' ');
+
+      return (
+        <svg width={size} height={size} style={{ display: 'block', margin: '0 auto' }}>
+          {/* Grid rings */}
+          {gridLevels.map(level => {
+            const pts = data.map((_, i) => toXY(i, level)).map(p => `${p.x},${p.y}`).join(' ');
+            return <polygon key={level} points={pts} fill="none" stroke="#f0f0f0" strokeWidth="1" />;
+          })}
+          {/* Axis lines */}
+          {data.map((_, i) => {
+            const outer = toXY(i, 10);
+            return <line key={i} x1={cx} y1={cy} x2={outer.x} y2={outer.y} stroke="#f0f0f0" strokeWidth="1" />;
+          })}
+          {/* Grid level labels */}
+          {[5, 10].map(level => {
+            const pos = toXY(0, level);
+            return <text key={level} x={pos.x + 4} y={pos.y + 4} fontSize="9" fill="#bbb" fontFamily="inherit">{level}</text>;
+          })}
+          {/* Data polygon */}
+          <polygon points={polygon} fill="#111" fillOpacity="0.1" stroke="#111" strokeWidth="1.5" />
+          {/* Data dots */}
+          {dataPoints.map((p, i) => <circle key={i} cx={p.x} cy={p.y} r={3} fill="#111" />)}
+          {/* Labels */}
+          {data.map((d, i) => {
+            const angle = angleStep * i - Math.PI / 2;
+            const labelR = r + 22;
+            const lx = cx + labelR * Math.cos(angle);
+            const ly = cy + labelR * Math.sin(angle);
+            const anchor = lx < cx - 4 ? 'end' : lx > cx + 4 ? 'start' : 'middle';
+            return (
+              <text key={i} x={lx} y={ly + 4} textAnchor={anchor} fontSize="11" fill="#555" fontFamily="inherit">
+                {d.label}
+              </text>
+            );
+          })}
+        </svg>
+      );
+    }
+
+    function PieChart({ data, size = 200 }) {
+      // data: [{ name, value, color }]
+      const cx = size / 2, cy = size / 2, r = size * 0.38;
+      const total = data.reduce((s, d) => s + d.value, 0);
+      if (!total) return null;
+
+      let currentAngle = -Math.PI / 2;
+      const slices = data.map(d => {
+        const sweep = (d.value / total) * 2 * Math.PI;
+        const startAngle = currentAngle;
+        const endAngle = currentAngle + sweep;
+        currentAngle = endAngle;
+        const x1 = cx + r * Math.cos(startAngle);
+        const y1 = cy + r * Math.sin(startAngle);
+        const x2 = cx + r * Math.cos(endAngle);
+        const y2 = cy + r * Math.sin(endAngle);
+        const largeArc = sweep > Math.PI ? 1 : 0;
+        const path = `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`;
+        return { ...d, path, sweep, midAngle: startAngle + sweep / 2 };
+      });
+
+      return (
+        <svg width={size} height={size} style={{ display: 'block', margin: '0 auto' }}>
+          {slices.map((s, i) => (
+            <path key={i} d={s.path} fill={s.color} stroke="#fff" strokeWidth="1.5" />
+          ))}
+        </svg>
+      );
+    }
+
+    function LineChart({ data, width = '100%', height = 160 }) {
+      // data: [{ i, complexity, task_type, date, turns }]
+      if (!data.length) return null;
+      const svgW = 700, svgH = height;
+      const pad = { top: 12, right: 16, bottom: 28, left: 32 };
+      const plotW = svgW - pad.left - pad.right;
+      const plotH = svgH - pad.top - pad.bottom;
+
+      const xScale = i => pad.left + ((i) / (data.length - 1 || 1)) * plotW;
+      const yScale = v => pad.top + plotH - ((v - 1) / 4) * plotH;
+
+      const linePoints = data.map((d, i) => `${xScale(i)},${yScale(d.complexity)}`).join(' ');
+
+      const TASK_COLORS_LOCAL = {
+        debugging: '#e63946', feature_implementation: '#457b9d', refactoring: '#2a9d8f',
+        code_understanding: '#f4a261', design_planning: '#9b5de5', data_science: '#00b4d8',
+        front_end: '#f72585', papercut_fix: '#06d6a0', other: '#adb5bd',
+      };
+
+      return (
+        <svg viewBox={`0 0 ${svgW} ${svgH}`} width={width} height={height} style={{ display: 'block' }}>
+          {/* Y axis grid */}
+          {[1,2,3,4,5].map(v => (
+            <g key={v}>
+              <line x1={pad.left} y1={yScale(v)} x2={pad.left + plotW} y2={yScale(v)} stroke="#f3f3f3" strokeWidth="1" />
+              <text x={pad.left - 6} y={yScale(v) + 4} textAnchor="end" fontSize="10" fill="#bbb">{v}</text>
+            </g>
+          ))}
+          {/* Connecting line */}
+          <polyline points={linePoints} fill="none" stroke="#e5e5e5" strokeWidth="1.5" />
+          {/* Trend line */}
+          {(() => {
+            if (data.length < 2) return null;
+            const n = data.length, mX = (n - 1) / 2;
+            const mY = data.reduce((s, d) => s + d.complexity, 0) / n;
+            const num = data.reduce((s, d, i) => s + (i - mX) * (d.complexity - mY), 0);
+            const den = data.reduce((s, _, i) => s + (i - mX) ** 2, 0);
+            const slope = den === 0 ? 0 : num / den;
+            const intercept = mY - slope * mX;
+            const clamp = v => Math.max(1, Math.min(5, v));
+            return <line x1={xScale(0)} y1={yScale(clamp(intercept))} x2={xScale(n - 1)} y2={yScale(clamp(slope * (n - 1) + intercept))}
+              stroke="#111" strokeWidth="1" strokeDasharray="4 3" opacity="0.4" />;
+          })()}
+          {/* Dots */}
+          {data.map((d, i) => (
+            <circle key={i} cx={xScale(i)} cy={yScale(d.complexity)} r={5}
+              fill={TASK_COLORS_LOCAL[d.task_type] || '#adb5bd'} stroke="#fff" strokeWidth="1.5">
+              <title>{d.date} · {d.task_type} · complexity {d.complexity} · {d.turns} turns</title>
+            </circle>
+          ))}
+          {/* X axis labels (every ~8 sessions) */}
+          {data.filter((_, i) => i % Math.max(1, Math.floor(data.length / 8)) === 0).map((d, i, arr) => {
+            const origIdx = data.indexOf(d);
+            return (
+              <text key={i} x={xScale(origIdx)} y={svgH - 6} textAnchor="middle" fontSize="10" fill="#bbb">
+                {d.date?.slice(5) || d.i}
+              </text>
+            );
+          })}
+          {/* Axis labels */}
+          <text x={pad.left - 20} y={pad.top + plotH / 2} textAnchor="middle" fontSize="10" fill="#bbb"
+            transform={`rotate(-90, ${pad.left - 20}, ${pad.top + plotH / 2})`}>Complexity</text>
+          <text x={pad.left + plotW / 2} y={svgH} textAnchor="middle" fontSize="10" fill="#bbb">Session</text>
+        </svg>
+      );
+    }
+
+    // ─── Provider Config ──────────────────────────────────────────────────────
+
+    const PROVIDERS = {
+      gemini: { label: 'Gemini', placeholder: 'AIza...', model: 'gemini-3.1-flash-lite', hint: 'aistudio.google.com' },
+      openai: { label: 'OpenAI', placeholder: 'sk-...',  model: 'gpt-4o-mini',           hint: 'platform.openai.com' },
+      claude: { label: 'Claude', placeholder: 'sk-ant-...', model: 'claude-sonnet-4-6',  hint: 'console.anthropic.com' },
+    };
+
+    async function callAPI(provider, apiKey, prompt, maxTokens = 1024) {
+      if (provider === 'gemini') {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${PROVIDERS.gemini.model}:generateContent?key=${apiKey}`,
+          { method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }) }
+        );
+        if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`Gemini ${res.status}: ${e.error?.message || res.statusText}`); }
+        const d = await res.json();
+        return d.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      }
+      if (provider === 'openai') {
+        const res = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST', headers: { 'content-type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+          body: JSON.stringify({ model: PROVIDERS.openai.model, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] })
+        });
+        if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`OpenAI ${res.status}: ${e.error?.message || res.statusText}`); }
+        const d = await res.json();
+        return d.choices?.[0]?.message?.content || '';
+      }
+      if (provider === 'claude') {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json', 'anthropic-dangerous-allow-browser': 'true' },
+          body: JSON.stringify({ model: PROVIDERS.claude.model, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] })
+        });
+        if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(`Claude ${res.status}: ${e.error?.message || res.statusText}`); }
+        const d = await res.json();
+        return d.content?.[0]?.text || '';
+      }
+      throw new Error('Unknown provider');
+    }
+
+    // ─── Constants ────────────────────────────────────────────────────────────
+
+    const BATCH_SIZE = 5;
+    const MAX_LLM_SESSIONS = 100;
+
+    const CORRECTION_KEYWORDS = [
+      'no ', 'wrong', 'not that', "dont", "don't", 'stop ', 'wait ',
+      'actually', 'instead', 'undo', 'revert', "that's not", 'thats not',
+      'not right', 'incorrect', 'that is not', 'you missed', 'you forgot',
+    ];
+
+    const GOOD_DELEGATION_TYPES = new Set([
+      'debugging', 'refactoring', 'papercut_fix', 'code_understanding', 'data_science', 'front_end',
+    ]);
+
+    const TASK_TYPE_LABELS = {
+      debugging: 'Debugging', feature_implementation: 'Feature Implementation',
+      refactoring: 'Refactoring', code_understanding: 'Code Understanding',
+      design_planning: 'Design & Planning', data_science: 'Data Science',
+      front_end: 'Front-End', papercut_fix: 'Papercut Fix', other: 'Other',
+    };
+
+    const TASK_COLORS = {
+      debugging: '#e63946', feature_implementation: '#457b9d', refactoring: '#2a9d8f',
+      code_understanding: '#f4a261', design_planning: '#9b5de5', data_science: '#00b4d8',
+      front_end: '#f72585', papercut_fix: '#06d6a0', other: '#adb5bd',
+    };
+
+    const MATURITY_LEVELS = [
+      { max: 3,  label: 'Early Adopter',           desc: 'Using Claude for simple tasks, heavy steering, limited delegation.' },
+      { max: 5,  label: 'Developing Collaborator',  desc: 'Growing delegation patterns, some oversight, narrow task range.' },
+      { max: 7,  label: 'Effective Delegator',      desc: 'Strategic task choice, appropriate autonomy, decent breadth.' },
+      { max: 9,  label: 'AI-Native Builder',        desc: 'High autonomy granted, strong oversight, generating new work.' },
+      { max: 10, label: 'AI Power User',            desc: 'Benchmark-beating metrics, full-stack, complexity progression, optimal supervision.' },
+    ];
+
+    const DIMENSION_META = {
+      delegationIntelligence: { label: 'Delegation Intelligence', short: 'Delegation',  weight: 0.25, desc: 'Are tasks delegated to Claude the right ones?' },
+      autonomyCalibration:    { label: 'Autonomy Calibration',    short: 'Autonomy',    weight: 0.20, desc: 'Does the user grant appropriate autonomy to Claude?' },
+      oversightQuality:       { label: 'Oversight Quality',       short: 'Oversight',   weight: 0.20, desc: 'Does the user catch and correct bad outputs?' },
+      complexityProgression:  { label: 'Complexity Progression',  short: 'Complexity',  weight: 0.15, desc: 'Is task complexity increasing over time?' },
+      taskBreadth:            { label: 'Task Breadth',            short: 'Breadth',     weight: 0.10, desc: 'How wide a range of task types are being delegated?' },
+      newWorkGeneration:      { label: 'New Work Generation',     short: 'New Work',    weight: 0.10, desc: "What % of tasks wouldn't have been done without AI?" },
+    };
+
+    // ─── JSONL Parser ─────────────────────────────────────────────────────────
+
+    function parseJSONLFiles(fileTexts) {
+      const map = {};
+      for (const text of fileTexts) {
+        for (const line of text.split('\n')) {
+          const t = line.trim(); if (!t) continue;
+          let e; try { e = JSON.parse(t); } catch { continue; }
+          if (e.type !== 'user' && e.type !== 'assistant') continue;
+          const sid = e.sessionId; if (!sid) continue;
+          if (!map[sid]) map[sid] = { sessionId: sid, entries: [] };
+          map[sid].entries.push(e);
+        }
+      }
+      return Object.values(map);
+    }
+
+    // ─── Metric Extractor ─────────────────────────────────────────────────────
+
+    function isHumanTurn(entry) {
+      if (entry.type !== 'user') return false;
+      const c = entry.message?.content;
+      return Array.isArray(c) && c.some(b => b.type === 'text' && b.text?.trim());
+    }
+
+    function extractText(content) {
+      if (typeof content === 'string') return content;
+      if (!Array.isArray(content)) return '';
+      return content.filter(b => b.type === 'text').map(b => b.text || '').join('\n')
+        .replace(/<(ide_opened_file|system-reminder|ide_selection)[^>]*>[\s\S]*?<\/\1>/g, '')
+        .replace(/<(ide_opened_file|system-reminder)[^>]*>[\s\S]*/g, '').trim();
+    }
+
+    function computeMetrics(session) {
+      const { sessionId, entries } = session;
+      const humanTexts = [], timestamps = [];
+      let totalToolCalls = 0, maxConsecutiveToolCalls = 0, currentRun = 0;
+
+      for (const entry of entries) {
+        if (entry.timestamp) timestamps.push(entry.timestamp);
+        if (entry.type === 'assistant') {
+          const c = entry.message?.content;
+          if (Array.isArray(c)) {
+            const tc = c.filter(b => b.type === 'tool_use').length;
+            if (tc > 0) { totalToolCalls += tc; currentRun += tc; if (currentRun > maxConsecutiveToolCalls) maxConsecutiveToolCalls = currentRun; }
+          }
+        } else if (isHumanTurn(entry)) {
+          currentRun = 0;
+          const text = extractText(entry.message.content);
+          if (text) humanTexts.push(text);
+        }
+      }
+
+      timestamps.sort();
+      let durationMinutes = null;
+      if (timestamps.length >= 2) {
+        const d = (new Date(timestamps[timestamps.length - 1]) - new Date(timestamps[0])) / 60000;
+        if (d >= 0 && d < 600) durationMinutes = Math.round(d * 10) / 10;
+      }
+
+      const correctionCount = humanTexts.filter(t => CORRECTION_KEYWORDS.some(kw => t.toLowerCase().includes(kw))).length;
+      const taskTextSummary = [...humanTexts.slice(0, 2), humanTexts.length > 2 ? humanTexts[humanTexts.length - 1] : null]
+        .filter(Boolean).join('\n---\n').slice(0, 1200);
+
+      return {
+        sessionId, sessionStart: timestamps[0] || '', durationMinutes,
+        totalTurns: humanTexts.length, totalToolCalls, maxConsecutiveToolCalls,
+        correctionCount, correctionRate: humanTexts.length ? correctionCount / humanTexts.length : 0,
+        isPureChat: totalToolCalls === 0, isQuickQuery: humanTexts.length < 3,
+        taskTextSummary, humanTexts,
+      };
+    }
+
+    // ─── JSON Parse Helper ────────────────────────────────────────────────────
+
+    function parseJSON(text) {
+      const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (fenced) { try { return JSON.parse(fenced[1].trim()); } catch {} }
+      const inline = text.match(/(\[[\s\S]*\]|\{[\s\S]*\})/);
+      if (inline) { try { return JSON.parse(inline[0]); } catch {} }
+      try { return JSON.parse(text.trim()); } catch {}
+      return null;
+    }
+
+    // ─── API Call 1 — Session Classification ─────────────────────────────────
+
+    async function classifySessions(provider, apiKey, sessions, onProgress) {
+      const results = {};
+      for (let i = 0; i < sessions.length; i += BATCH_SIZE) {
+        const batch = sessions.slice(i, i + BATCH_SIZE);
+        const blocks = batch.map((s, idx) =>
+          `SESSION ${idx + 1}:\nSummary: ${s.taskTextSummary}\nHuman turns: ${s.totalTurns} | Max consecutive tool calls: ${s.maxConsecutiveToolCalls}`
+        ).join('\n\n');
+        const prompt =
+          `Classify each Claude Code session below.\n\nFor EACH session return a JSON object with:\n` +
+          `- task_type: one of [debugging, feature_implementation, refactoring, code_understanding, design_planning, data_science, front_end, papercut_fix, other]\n` +
+          `- complexity: integer 1-5 (1=typo/edit, 3=standard feature, 5=expert architecture)\n` +
+          `- is_new_work: boolean — true if wouldn't have been done without AI\n` +
+          `- delegation_appropriateness: "good" | "poor" | "unclear"\n\n` +
+          `Return a JSON array of ${batch.length} objects in session order. JSON only.\n\n` + blocks;
+        const raw = await callAPI(provider, apiKey, prompt, 800);
+        const parsed = parseJSON(raw);
+        if (Array.isArray(parsed)) batch.forEach((s, idx) => { results[s.sessionId] = parsed[idx] || {}; });
+        onProgress(`Classifying sessions… ${Math.min(sessions.length, i + BATCH_SIZE)}/${sessions.length}`);
+        if (i + BATCH_SIZE < sessions.length) await new Promise(r => setTimeout(r, 200));
+      }
+      return results;
+    }
+
+    // ─── API Call 2 — Oversight Event Detection ───────────────────────────────
+
+    async function detectOversightEvents(provider, apiKey, sessions, onProgress) {
+      const results = {};
+      for (let i = 0; i < sessions.length; i += BATCH_SIZE) {
+        const batch = sessions.slice(i, i + BATCH_SIZE);
+        const blocks = batch.map((s, idx) => {
+          const msgs = s.humanTexts.slice(0, 20).map((t, j) => `  [${j}] "${t.slice(0, 150).replace(/\n/g, ' ')}"`).join('\n');
+          return `SESSION ${idx + 1} (${s.humanTexts.length} turns):\n${msgs}`;
+        }).join('\n\n');
+        const prompt =
+          `Classify each user message in these Claude Code sessions.\n` +
+          `Categories: correction | redirection | validation | pure_input\n\n` +
+          `Return JSON array of ${batch.length} objects:\n` +
+          `[{"session_index":0,"events":[{"index":0,"type":"correction"}]}]\n\nJSON only.\n\n` + blocks;
+        const raw = await callAPI(provider, apiKey, prompt, 1200);
+        const parsed = parseJSON(raw);
+        if (Array.isArray(parsed)) {
+          batch.forEach((s, idx) => {
+            const found = parsed.find(p => p.session_index === idx) || parsed[idx] || {};
+            results[s.sessionId] = found.events || [];
+          });
+        }
+        onProgress(`Detecting oversight events… ${Math.min(sessions.length, i + BATCH_SIZE)}/${sessions.length}`);
+        if (i + BATCH_SIZE < sessions.length) await new Promise(r => setTimeout(r, 200));
+      }
+      return results;
+    }
+
+    // ─── API Call 3 — Holistic Summary ───────────────────────────────────────
+
+    async function getHolisticSummary(provider, apiKey, metrics, classifications, overallScore, dimensionScores) {
+      const lines = metrics.map(m => {
+        const c = classifications[m.sessionId] || {};
+        return `- ${m.sessionStart.slice(0,10)}: ${c.task_type||'unknown'} complexity=${c.complexity||'?'} turns=${m.totalTurns} maxConsec=${m.maxConsecutiveToolCalls} corrRate=${(m.correctionRate*100).toFixed(0)}%`;
+      }).join('\n');
+      const dimLine = Object.entries(DIMENSION_META).map(([k,m]) => `${m.label}: ${dimensionScores[k]?.score?.toFixed(1)||'?'}/10`).join(' | ');
+      const prompt =
+        `You are a senior AI productivity analyst reviewing Claude Code usage data.\n\n` +
+        `OVERALL SCORE: ${overallScore.toFixed(1)}/10\nDIMENSIONS: ${dimLine}\n\nSESSION DATA:\n${lines}\n\n` +
+        `Provide: strengths (3 specific), gaps (3 with recommendations), delegation_pattern (1-2 sentences), maturity_narrative (2-3 sentences).\n` +
+        `Return JSON only: {"strengths":["..."],"gaps":["..."],"delegation_pattern":"...","maturity_narrative":"..."}`;
+      const raw = await callAPI(provider, apiKey, prompt, 700);
+      return parseJSON(raw) || {
+        strengths: ['Consistent Claude Code usage across sessions', 'Active AI tooling engagement', 'Iterative development patterns'],
+        gaps: ['Diversify task types delegated to Claude', 'Increase autonomous tool call chains', 'Build explicit output verification habits'],
+        delegation_pattern: 'Regular AI assistance across development tasks.',
+        maturity_narrative: 'Building AI-native habits with room to grow.',
+      };
+    }
+
+    // ─── Scoring ──────────────────────────────────────────────────────────────
+
+    function scoreDelegationIntelligence(metrics, classifications) {
+      const s = metrics.filter(m => classifications[m.sessionId]?.task_type);
+      if (!s.length) return { score: 5, goodCount: 0, total: 0, pct: 0 };
+      const good = s.filter(m => { const c = classifications[m.sessionId]; return c.delegation_appropriateness === 'good' && (c.complexity <= 3 || GOOD_DELEGATION_TYPES.has(c.task_type)); });
+      const pct = good.length / s.length;
+      return { score: Math.max(1, Math.min(10, Math.round(pct * 10 * 10) / 10)), goodCount: good.length, total: s.length, pct: Math.round(pct * 100) };
+    }
+
+    function scoreAutonomyCalibration(metrics) {
+      const active = metrics.filter(m => !m.isPureChat && m.totalTurns > 0);
+      if (!active.length) return { score: 1, avgMaxConsec: 0, avgTurns: 0, ratio: 0 };
+      const avgMaxConsec = active.reduce((s, m) => s + m.maxConsecutiveToolCalls, 0) / active.length;
+      const avgTurns = metrics.reduce((s, m) => s + m.totalTurns, 0) / metrics.length;
+      const ratio = avgTurns > 0 ? avgMaxConsec / avgTurns : 0;
+      let score;
+      if      (ratio >= 5.17) score = 10; else if (ratio >= 4.0) score = 9;
+      else if (ratio >= 3.0)  score = 8;  else if (ratio >= 2.5) score = 7;
+      else if (ratio >= 1.58) score = 6;  else if (ratio >= 1.2) score = 5;
+      else if (ratio >= 0.8)  score = 4;  else if (ratio >= 0.5) score = 3;
+      else if (ratio >= 0.2)  score = 2;  else score = 1;
+      return { score, avgMaxConsec: Math.round(avgMaxConsec * 10) / 10, avgTurns: Math.round(avgTurns * 10) / 10, ratio: Math.round(ratio * 100) / 100 };
+    }
+
+    function scoreOversightQuality(metrics, oversightEvents) {
+      let totalOversight = 0, totalTurns = 0;
+      for (const m of metrics) {
+        totalTurns += m.totalTurns;
+        const events = oversightEvents[m.sessionId] || [];
+        const llm = events.filter(e => e.type === 'correction' || e.type === 'redirection').length;
+        totalOversight += llm > 0 ? llm : m.correctionCount;
+      }
+      const rate = totalTurns > 0 ? totalOversight / totalTurns : 0;
+      let score;
+      if (rate >= 0.10 && rate <= 0.30) score = 10 - Math.abs(rate - 0.20) / 0.10 * 2;
+      else if (rate < 0.10) score = Math.max(1, (rate / 0.10) * 7);
+      else score = Math.max(1, 8 - ((rate - 0.30) / 0.20) * 7);
+      return { score: Math.round(score * 10) / 10, rate: Math.round(rate * 1000) / 10 };
+    }
+
+    function scoreComplexityProgression(metrics, classifications) {
+      const pts = metrics.filter(m => classifications[m.sessionId]?.complexity && m.sessionStart)
+        .sort((a, b) => a.sessionStart.localeCompare(b.sessionStart));
+      if (pts.length < 2) return { score: 5, slope: 0, avgComplexity: 0 };
+      const n = pts.length;
+      const xs = pts.map((_, i) => i), ys = pts.map(m => classifications[m.sessionId].complexity);
+      const mX = xs.reduce((a, b) => a + b, 0) / n, mY = ys.reduce((a, b) => a + b, 0) / n;
+      const num = xs.reduce((s, x, i) => s + (x - mX) * (ys[i] - mY), 0);
+      const den = xs.reduce((s, x) => s + (x - mX) ** 2, 0);
+      const slope = den === 0 ? 0 : num / den;
+      let score;
+      if      (slope >= 0.05)   score = 10; else if (slope >= 0.024) score = 8;
+      else if (slope >= 0.01)   score = 7;  else if (slope >= 0)     score = 5;
+      else if (slope >= -0.01)  score = 4;  else if (slope >= -0.024) score = 3;
+      else score = 1;
+      return { score, slope: Math.round(slope * 1000) / 1000, avgComplexity: Math.round(mY * 10) / 10 };
+    }
+
+    function scoreTaskBreadth(classifications) {
+      const types = new Set(Object.values(classifications).map(c => c.task_type).filter(t => t && t !== 'other'));
+      return { score: Math.min(10, Math.round((types.size / 8) * 10 * 10) / 10), distinctTypes: types.size, types: [...types] };
+    }
+
+    function scoreNewWorkGeneration(metrics, classifications) {
+      const s = metrics.filter(m => classifications[m.sessionId]?.task_type);
+      if (!s.length) return { score: 5, pct: 0, newWorkCount: 0, total: 0 };
+      const newWork = s.filter(m => classifications[m.sessionId].is_new_work === true);
+      const pct = newWork.length / s.length;
+      let score;
+      if      (pct >= 0.40) score = 10;
+      else if (pct >= 0.27) score = 7 + ((pct - 0.27) / 0.13) * 3;
+      else if (pct > 0)     score = 1 + (pct / 0.27) * 6;
+      else                  score = 1;
+      return { score: Math.max(1, Math.min(10, Math.round(score * 10) / 10)), pct: Math.round(pct * 100), newWorkCount: newWork.length, total: s.length };
+    }
+
+    function computeOverallScore(ds) {
+      return Object.entries(DIMENSION_META).reduce((t, [k, m]) => t + (ds[k]?.score || 0) * m.weight, 0);
+    }
+
+    function getMaturity(score) {
+      return MATURITY_LEVELS.find(m => score <= m.max) || MATURITY_LEVELS[MATURITY_LEVELS.length - 1];
+    }
+
+    // ─── UI ───────────────────────────────────────────────────────────────────
+
+    
+    function SectionLabel({ children }) {
+      return (
+        <h2 style={{ fontSize: '14px', fontWeight: 600, color: 'var(--sb-ink)', letterSpacing: '-0.01em', margin: '0 0 14px' }}>
+          {children}
+        </h2>
+      );
+    }
+
+    function ScoreBar({ score }) {
+      const pct = (score / 10) * 100;
+      const color = score >= 7 ? '#16a34a' : score >= 5 ? '#d97706' : '#dc2626';
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ flex: 1, background: 'var(--sb-line-soft)', borderRadius: '999px', height: '6px', overflow: 'hidden' }}>
+            <div style={{ height: '100%', borderRadius: '999px', transition: 'width 400ms ease-out', width: `${pct}%`, background: color }} />
+          </div>
+          <span style={{ fontSize: '12px', fontWeight: 600, fontVariantNumeric: 'tabular-nums', width: '28px', textAlign: 'right', color }}>
+            {score.toFixed(1)}
+          </span>
+        </div>
+      );
+    }
+
+    function UploadScreen({ onAnalyze, error }) {
+      const [provider, setProvider] = useState('gemini');
+      const [apiKey, setApiKey]     = useState('');
+      const [files, setFiles]       = useState([]);
+      const [dragOver, setDragOver] = useState(false);
+      const inputRef = useRef();
+
+      const handleDrop = useCallback(e => {
+        e.preventDefault(); setDragOver(false);
+        setFiles(Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.jsonl')));
+      }, []);
+
+      const p = PROVIDERS[provider];
+      const ready = apiKey.trim().length > 8 && files.length > 0;
+
+      return (
+        <div style={{ maxWidth: '520px', margin: '0 auto', padding: '64px 24px 80px' }}>
+          <h1 style={{ fontSize: '28px', fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1.1, color: 'var(--sb-ink)', margin: '0 0 12px' }}>
+            Claude Code Session Analyzer
+          </h1>
+          <p style={{ fontSize: '15px', color: 'var(--sb-ink-2)', margin: '0 0 36px', lineHeight: 1.6, maxWidth: '440px' }}>
+            Upload your Claude Code session files and receive a behavioral assessment across 6 dimensions —
+            benchmarked against Anthropic's internal engineering cohort.
+          </p>
+
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', fontSize: '13px', fontWeight: 600, color: 'var(--sb-ink)', marginBottom: '8px' }}>
+              AI Provider
+            </label>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              {Object.entries(PROVIDERS).map(([id, cfg]) => (
+                <button key={id} onClick={() => { setProvider(id); setApiKey(''); }}
+                  style={{ padding: '6px 18px', borderRadius: '20px', fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+                    border: provider === id ? '2px solid var(--sb-ink)' : '2px solid var(--sb-line)',
+                    background: provider === id ? 'var(--sb-ink)' : 'var(--sb-paper)', color: provider === id ? '#fff' : 'var(--sb-ink-2)',
+                    transition: 'all 120ms' }}>
+                  {cfg.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', fontSize: '13px', fontWeight: 600, color: 'var(--sb-ink)', marginBottom: '8px' }}>{p.label} API Key</label>
+            <input type="password" placeholder={p.placeholder} value={apiKey} onChange={e => setApiKey(e.target.value)}
+              style={{ width: '100%', padding: '10px 12px', border: '1px solid var(--sb-line)', borderRadius: '6px', fontSize: '14px', background: 'var(--sb-paper)' }} />
+            <p style={{ fontSize: '12px', color: 'var(--sb-ink-4)', marginTop: '4px' }}>Model: <strong style={{color:'var(--sb-ink-3)'}}>{p.model}</strong> · {p.hint}</p>
+          </div>
+
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{ display: 'block', fontSize: '13px', fontWeight: 600, color: 'var(--sb-ink)', marginBottom: '8px' }}>
+              Session Files (.jsonl)
+            </label>
+            <div
+              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+              onClick={() => inputRef.current.click()}
+              style={{
+                border: `2px dashed ${dragOver ? 'var(--sb-accent)' : 'var(--sb-line)'}`,
+                background: dragOver ? 'color-mix(in oklab, var(--sb-accent) 5%, var(--sb-bg))' : 'var(--sb-paper)',
+                borderRadius: '12px', padding: '32px 24px', textAlign: 'center', cursor: 'pointer',
+                transition: 'border-color 120ms, background 120ms',
+              }}
+            >
+              <input ref={inputRef} type="file" accept=".jsonl" multiple style={{ display: 'none' }}
+                onChange={e => setFiles(Array.from(e.target.files))} />
+              {files.length > 0 ? (
+                <p style={{ fontSize: '14px', fontWeight: 600, color: 'var(--sb-ink)', margin: 0 }}>
+                  {files.length} file{files.length !== 1 ? 's' : ''} selected
+                </p>
+              ) : (
+                <>
+                  <p style={{ fontSize: '13.5px', color: 'var(--sb-ink-3)', margin: '0 0 4px' }}>Drop .jsonl files or click to select</p>
+                  <p style={{ fontSize: '12px', color: 'var(--sb-ink-4)', margin: 0, fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace' }}>
+                    {'~/.claude/projects/[your-project]/*.jsonl'}
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+
+          {files.length > 0 && (
+            <p style={{ fontSize: '12px', color: 'var(--sb-ink-3)', marginBottom: '16px', lineHeight: 1.5 }}>
+              {files.map(f => f.name).slice(0, 5).join(', ')}{files.length > 5 ? ` +${files.length - 5} more` : ''}
+            </p>
+          )}
+
+          {error && <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '8px', padding: '12px 16px', fontSize: '13px', color: '#991b1b', marginBottom: '16px' }}>{error}</div>}
+
+          <button disabled={!ready} onClick={() => onAnalyze(provider, apiKey, files)}
+            style={{ width: '100%', padding: '14px', background: ready ? 'var(--sb-ink)' : 'var(--sb-line)',
+              color: ready ? '#fff' : 'var(--sb-ink-4)', border: 'none', borderRadius: '8px', fontSize: '14px', fontWeight: 600,
+              cursor: ready ? 'pointer' : 'not-allowed', transition: 'background 120ms' }}>
+            Analyze Sessions
+          </button>
+        </div>
+      );
+    }
+
+    function ProcessingScreen({ status, progress }) {
+      return (
+        <div style={{ maxWidth: '360px', margin: '160px auto 0', padding: '0 24px', textAlign: 'center' }}>
+          <p style={{ fontSize: '14px', fontWeight: 500, color: 'var(--sb-ink)', margin: '0 0 16px' }}>{status}</p>
+          <div style={{ background: 'var(--sb-line)', borderRadius: '999px', height: '3px', overflow: 'hidden' }}>
+            <div style={{ background: 'var(--sb-accent)', height: '100%', width: `${progress}%`, transition: 'width 300ms ease-out', borderRadius: '999px' }} />
+          </div>
+          <p style={{ fontSize: '12px', color: 'var(--sb-ink-4)', marginTop: '8px', fontVariantNumeric: 'tabular-nums' }}>{Math.round(progress)}%</p>
+        </div>
+      );
+    }
+
+    function ReportScreen({ result, onReset }) {
+      const { metrics, classifications, oversightEvents, dimensionScores, overallScore, summary, sampledFrom } = result;
+      const maturity = getMaturity(overallScore);
+
+      const dates = metrics.map(m => m.sessionStart).filter(Boolean).sort();
+      const dateRange = dates.length >= 2 ? `${dates[0].slice(0,10)} — ${dates[dates.length-1].slice(0,10)}` : dates[0]?.slice(0,10) || '—';
+      
+      const counts = {};
+      Object.values(classifications).forEach(c => { const t = c.task_type || 'other'; counts[t] = (counts[t]||0)+1; });
+      const taskRows = Object.entries(counts)
+        .map(([name, value]) => ({ name, value, color: TASK_COLORS[name] || '#adb5bd' }))
+        .sort((a, b) => b.value - a.value);
+      const taskTotal = taskRows.reduce((s, d) => s + d.value, 0);
+
+      const timelineData = metrics
+        .filter(m => m.sessionStart && classifications[m.sessionId]?.complexity)
+        .sort((a, b) => a.sessionStart.localeCompare(b.sessionStart))
+        .map((m, i) => ({
+          i: i + 1, date: m.sessionStart.slice(0,10),
+          complexity: classifications[m.sessionId].complexity,
+          task_type: classifications[m.sessionId].task_type || 'other',
+          turns: m.totalTurns,
+        }));
+
+      const typesSeen = [...new Set(timelineData.map(d => d.task_type))];
+
+      const a = dimensionScores.autonomyCalibration;
+      const cp = dimensionScores.complexityProgression;
+      const benchRows = [
+        { metric: 'Max consecutive tool calls', user: a?.avgMaxConsec ?? 0, feb: 9.8, aug: 21.2, higherBetter: true },
+        { metric: 'Avg human turns per session', user: a?.avgTurns ?? 0, feb: 6.2, aug: 4.1, higherBetter: false },
+        { metric: 'Avg task complexity (1–5)', user: cp?.avgComplexity ?? 0, feb: 3.2, aug: 3.8, higherBetter: true },
+      ];
+
+      const card = { background: 'var(--sb-paper)', borderRadius: '16px', border: '1px solid var(--sb-line)', padding: '24px', marginBottom: '16px' };
+
+      return (
+        <div style={{ maxWidth: '768px', margin: '0 auto', padding: '32px 20px 96px' }}>
+          {/* Top bar */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '28px' }}>
+            <span style={{ fontSize: '12px', color: 'var(--sb-ink-4)', fontWeight: 500 }}>Session Analysis Report</span>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button onClick={() => window.print()}
+                style={{ fontSize: '12.5px', color: 'var(--sb-ink-2)', border: '1px solid var(--sb-line)', background: 'var(--sb-paper)', borderRadius: '7px', padding: '6px 12px', cursor: 'pointer', fontFamily: 'inherit', transition: 'background 120ms' }}>
+                Save PDF
+              </button>
+              <button onClick={onReset}
+                style={{ fontSize: '12.5px', color: 'var(--sb-ink-2)', border: '1px solid var(--sb-line)', background: 'var(--sb-paper)', borderRadius: '7px', padding: '6px 12px', cursor: 'pointer', fontFamily: 'inherit', transition: 'background 120ms' }}>
+                Analyze another
+              </button>
+            </div>
+          </div>
+
+          {sampledFrom && (
+            <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '10px', padding: '8px 16px', fontSize: '12.5px', color: '#92400e', marginBottom: '24px' }}>
+              {sampledFrom} sessions found — scored using a representative sample of {MAX_LLM_SESSIONS}.
+            </div>
+          )}
+
+          {/* HERO */}
+          <div style={{ background: 'var(--sb-ink)', color: '#fff', borderRadius: '16px', padding: '32px', marginBottom: '16px' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-end', justifyContent: 'space-between', gap: '16px', marginBottom: '24px' }}>
+              <div>
+                <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)', letterSpacing: '0.03em', fontWeight: 500, margin: '0 0 8px' }}>AI Coding Maturity</p>
+                <h1 style={{ fontSize: '34px', fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 1.05, margin: 0 }}>{maturity.label}</h1>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <span style={{ fontSize: '52px', fontWeight: 700, letterSpacing: '-0.04em', lineHeight: 1 }}>{overallScore.toFixed(1)}</span>
+                <span style={{ fontSize: '20px', color: 'rgba(255,255,255,0.3)', fontWeight: 300, marginLeft: '3px' }}>/10</span>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '4px', marginBottom: '10px' }}>
+              {MATURITY_LEVELS.map((lvl, i) => (
+                <div key={lvl.label} style={{ flex: 1, background: lvl.max <= maturity.max ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.04)', borderRadius: '4px', height: '6px' }} />
+              ))}
+            </div>
+            <p style={{ fontSize: '14px', color: 'rgba(255,255,255,0.7)', lineHeight: 1.6, margin: 0, maxWidth: '600px' }}>{maturity.desc}</p>
+          </div>
+
+          {/* BENCHMARK */}
+          <div style={card}>
+            <SectionLabel>Benchmark vs. Engineering Cohort</SectionLabel>
+            {benchRows.map((row, ri) => {
+              const beating = row.higherBetter ? row.user >= row.aug : row.user <= row.aug;
+              return (
+                <div key={row.metric} style={{ display: 'grid', gridTemplateColumns: '1fr 72px 72px 72px', gap: '0 8px', alignItems: 'center', padding: '12px 0', borderBottom: ri < benchRows.length - 1 ? '1px solid var(--sb-line-soft)' : 'none' }}>
+                  <div>
+                    <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--sb-ink)' }}>{row.metric}</span>
+                    <span style={{ fontSize: '11px', color: 'var(--sb-ink-4)', marginLeft: '8px' }}>{row.higherBetter ? '↑ higher' : '↓ lower'}</span>
+                  </div>
+                  <span style={{ fontSize: '13px', color: 'var(--sb-ink-4)', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{row.feb}</span>
+                  <span style={{ fontSize: '13px', color: 'var(--sb-ink-3)', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{row.aug}</span>
+                  <span style={{ fontSize: '14px', fontWeight: 700, color: beating ? '#16a34a' : '#d97706', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{row.user.toFixed(1)}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* STRENGTHS + GAPS */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '16px', marginBottom: '16px' }}>
+            <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '16px', padding: '20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+                <span style={{ color: '#16a34a', fontSize: '14px', fontWeight: 700 }}>✓</span>
+                <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--sb-ink)', letterSpacing: '-0.01em' }}>Strengths</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                {summary.strengths.map((s, i) => (
+                  <div key={i} style={{ display: 'flex', gap: '8px', fontSize: '13.5px', lineHeight: 1.55 }}>
+                    <span style={{ color: '#4ade80', flexShrink: 0, marginTop: '1px' }}>✓</span>
+                    <span style={{ color: '#166534' }}>{s}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: '16px', padding: '20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px' }}>
+                <span style={{ color: '#d97706', fontSize: '14px', fontWeight: 700 }}>→</span>
+                <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--sb-ink)', letterSpacing: '-0.01em' }}>Gaps & Recommendations</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                {summary.gaps.map((g, i) => (
+                  <div key={i} style={{ display: 'flex', gap: '8px', fontSize: '13.5px', lineHeight: 1.55 }}>
+                    <span style={{ color: '#fb923c', flexShrink: 0, marginTop: '1px' }}>→</span>
+                    <span style={{ color: '#9a3412' }}>{g}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* BEHAVIORAL DIMENSIONS */}
+          <div style={card}>
+            <SectionLabel>Behavioral Dimensions</SectionLabel>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '24px 32px' }}>
+              {Object.entries(DIMENSION_META).map(([key, meta]) => {
+                const d = dimensionScores[key];
+                return (
+                  <div key={key}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '6px' }}>
+                      <span style={{ fontSize: '13.5px', fontWeight: 500, color: 'var(--sb-ink)' }}>{meta.label}</span>
+                      <span style={{ fontSize: '11px', color: 'var(--sb-ink-4)' }}>{Math.round(meta.weight * 100)}%</span>
+                    </div>
+                    <ScoreBar score={d?.score || 0} />
+                    <p style={{ fontSize: '12px', color: 'var(--sb-ink-3)', margin: '5px 0 0', lineHeight: 1.5 }}>{meta.desc}</p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* COMPLEXITY PROGRESSION */}
+          {timelineData.length > 1 && (
+            <div style={card}>
+              <SectionLabel>Complexity Progression</SectionLabel>
+              <p style={{ fontSize: '12.5px', color: 'var(--sb-ink-3)', margin: '-8px 0 16px', lineHeight: 1.5 }}>
+                Task complexity over time — an upward trend means you're taking on harder problems
+              </p>
+              <LineChart data={timelineData} height={160} />
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', marginTop: '16px' }}>
+                {typesSeen.map(t => (
+                  <span key={t} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--sb-ink-3)' }}>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0, background: TASK_COLORS[t] || '#adb5bd', display: 'inline-block' }} />
+                    {TASK_TYPE_LABELS[t] || t}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* SESSION BREAKDOWN */}
+          <div style={{ ...card, marginBottom: 0 }}>
+            <SectionLabel>Session Breakdown</SectionLabel>
+            <p style={{ fontSize: '12.5px', color: 'var(--sb-ink-3)', margin: '-8px 0 20px' }}>
+              Task type distribution across {metrics.length} sessions ({dateRange})
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {taskRows.map(d => {
+                const pct = Math.round((d.value / taskTotal) * 100);
+                return (
+                  <div key={d.name} style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: d.color, flexShrink: 0, display: 'inline-block' }} />
+                    <span style={{ fontSize: '13px', color: 'var(--sb-ink-2)', width: '180px', flexShrink: 0 }}>
+                      {TASK_TYPE_LABELS[d.name] || d.name}
+                    </span>
+                    <div style={{ flex: 1, height: '6px', background: 'var(--sb-line-soft)', borderRadius: '999px', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${pct}%`, background: d.color, borderRadius: '999px', transition: 'width 400ms ease-out' }} />
+                    </div>
+                    <span style={{ fontSize: '12px', color: 'var(--sb-ink-4)', width: '32px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                      {pct}%
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [screen, setScreen]     = useState('upload');
+      const [status, setStatus]     = useState('');
+      const [progress, setProgress] = useState(0);
+      const [result, setResult]     = useState(null);
+      const [error, setError]       = useState(null);
+
+      const analyze = useCallback(async (provider, apiKey, files) => {
+        setScreen('processing'); setError(null); setProgress(0);
+        try {
+          setStatus('Reading files…'); setProgress(5);
+          const fileTexts = await Promise.all(
+            files.map(f => new Promise((res, rej) => { const r = new FileReader(); r.onload = e => res(e.target.result); r.onerror = rej; r.readAsText(f); }))
+          );
+
+          setStatus('Parsing sessions…'); setProgress(10);
+          const rawSessions = parseJSONLFiles(fileTexts);
+          let metrics = rawSessions.map(computeMetrics)
+            .filter(m => m.totalTurns > 0 || m.totalToolCalls > 0)
+            .sort((a, b) => a.sessionStart.localeCompare(b.sessionStart));
+
+          const allMetrics = metrics;
+          if (metrics.length > MAX_LLM_SESSIONS) {
+            const step = Math.floor(metrics.length / MAX_LLM_SESSIONS);
+            metrics = metrics.filter((_, i) => i % step === 0).slice(0, MAX_LLM_SESSIONS);
+          }
+
+          setStatus(`Found ${allMetrics.length} sessions. Classifying…`); setProgress(15);
+          const batchCount = Math.ceil(metrics.length / BATCH_SIZE);
+
+          const classifications = await classifySessions(provider, apiKey, metrics, msg => {
+            setStatus(msg); setProgress(p => Math.min(52, p + 37 / batchCount));
+          });
+          setProgress(52);
+
+          const oversightEvents = await detectOversightEvents(provider, apiKey, metrics, msg => {
+            setStatus(msg); setProgress(p => Math.min(80, p + 28 / batchCount));
+          });
+          setProgress(80);
+
+          setStatus('Scoring dimensions…');
+          const dimensionScores = {
+            delegationIntelligence: scoreDelegationIntelligence(metrics, classifications),
+            autonomyCalibration:    scoreAutonomyCalibration(metrics),
+            oversightQuality:       scoreOversightQuality(metrics, oversightEvents),
+            complexityProgression:  scoreComplexityProgression(metrics, classifications),
+            taskBreadth:            scoreTaskBreadth(classifications),
+            newWorkGeneration:      scoreNewWorkGeneration(metrics, classifications),
+          };
+          const overallScore = computeOverallScore(dimensionScores);
+          setProgress(86);
+
+          setStatus('Generating summary…');
+          const summary = await getHolisticSummary(provider, apiKey, metrics, classifications, overallScore, dimensionScores);
+          setProgress(100);
+
+          setResult({ metrics: allMetrics, classifications, oversightEvents, dimensionScores, overallScore, summary, sampledFrom: allMetrics.length > MAX_LLM_SESSIONS ? allMetrics.length : null });
+          setScreen('report');
+        } catch (err) {
+          setError(err.message); setScreen('upload');
+        }
+      }, []);
+
+      if (screen === 'processing') return <ProcessingScreen status={status} progress={progress} />;
+      if (screen === 'report' && result) return <ReportScreen result={result} onReset={() => { setResult(null); setScreen('upload'); }} />;
+      return <UploadScreen onAnalyze={analyze} error={error} />;
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+output/
+__pycache__/
+*.pyc
+.env
+.env.local
+*.csv
+*.json
+!requirements.txt
+.claude/
