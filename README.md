@@ -4,7 +4,7 @@ A single-file web app that analyzes Claude Code session transcripts and produces
 
 **[Try it live →](https://www.ai-native-builder.com/analyze/claude-code)**
 
-[![Demo](https://img.youtube.com/vi/P8_yYkKfSqg/maxresdefault.jpg)](https://youtu.be/P8_yYkKfSqg)
+![Demo](demo.gif)
 
 ---
 
