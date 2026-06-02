@@ -23,7 +23,22 @@ Upload your `.jsonl` session files, enter an API key, and receive a structured r
 
 ## How to use (local)
 
-1. Open `index.html` in any browser — no install, no build step
+> **Note:** You must serve the file over HTTP — opening `index.html` directly (`file://`) causes browsers to block API requests.
+>
+> **Recommended (supports all providers including Claude):**
+> ```bash
+> python3 server.py
+> ```
+> This serves the app and proxies Anthropic API calls locally to work around browser CORS restrictions.
+>
+> **Gemini / OpenAI only** (simpler, no proxy needed):
+> ```bash
+> python3 -m http.server 8080 --bind 127.0.0.1
+> ```
+>
+> Then open `http://localhost:8080`. (Brave blocks external API calls by default — disable Shields for the page if you use it.)
+
+1. Start the local server as above, then open `http://localhost:8080`
 2. Select your AI provider (Gemini, OpenAI, or Claude)
 3. Enter your API key
 4. Upload your `.jsonl` session files from:
@@ -116,6 +131,7 @@ The analysis logic is entirely in `callAPI()`, `classifySessions()`, `detectOver
 
 ```
 index.html        — the entire web app, self-contained
+server.py         — local dev server with Anthropic CORS proxy (required for Claude provider)
 METHODOLOGY.md    — full technical methodology and scoring formulas
 README.md         — this file
 ```
@@ -129,6 +145,8 @@ Session files never leave the user's machine except for summarized inputs sent t
 - Sends only: first 2 + last user message per session (capped at 1200 chars), turn counts, and aggregated metrics
 - Does not send: full conversation content, code, file paths, or assistant responses
 - Nothing is stored — all processing is in-browser
+
+**API key note:** When using the Claude provider, your key is sent from the browser to `api.anthropic.com` (via the local proxy when running `server.py`, or directly when using the hosted version). Anthropic discourages browser-side API calls in production apps because keys can be exposed in client code. For this tool it is intentional — you supply your own key, it is never stored or forwarded anywhere other than Anthropic. If you prefer to keep the key server-side, see the self-hosting section above.
 
 ---
 

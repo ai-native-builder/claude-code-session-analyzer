@@ -1,3 +1,9 @@
+<!--
+  Claude Code Session Analyzer
+  Copyright (c) 2026 Behram Shukur
+  MIT License — https://opensource.org/licenses/MIT
+  https://github.com/ai-native-builder/claude-code-session-analyzer
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -225,7 +231,9 @@
         return d.choices?.[0]?.message?.content || '';
       }
       if (provider === 'claude') {
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
+        const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
+        const claudeUrl = isLocal ? '/api/anthropic' : 'https://api.anthropic.com/v1/messages';
+        const res = await fetch(claudeUrl, {
           method: 'POST',
           headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json', 'anthropic-dangerous-allow-browser': 'true' },
           body: JSON.stringify({ model: PROVIDERS.claude.model, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] })
@@ -235,6 +243,10 @@
         return d.content?.[0]?.text || '';
       }
       throw new Error('Unknown provider');
+    }
+
+    async function checkAPIKey(provider, apiKey) {
+      await callAPI(provider, apiKey, 'hi', 1);
     }
 
     // ─── Constants ────────────────────────────────────────────────────────────
@@ -558,6 +570,8 @@
       const [apiKey, setApiKey]     = useState('');
       const [files, setFiles]       = useState([]);
       const [dragOver, setDragOver] = useState(false);
+      const [keyStatus, setKeyStatus] = useState('idle');
+      const [keyError,  setKeyError]  = useState('');
       const inputRef = useRef();
 
       const handleDrop = useCallback(e => {
@@ -575,7 +589,9 @@
           </h1>
           <p style={{ fontSize: '15px', color: 'var(--sb-ink-2)', margin: '0 0 36px', lineHeight: 1.6, maxWidth: '440px' }}>
             Upload your Claude Code session files and receive a behavioral assessment across 6 dimensions —
-            benchmarked against Anthropic's internal engineering cohort.
+            benchmarked against Anthropic's internal engineering cohort.{' '}
+            <a href="https://www.anthropic.com/research/how-ai-is-transforming-work-at-anthropic" target="_blank" rel="noopener noreferrer"
+              style={{ color: 'var(--sb-ink-4)', fontSize: '12px' }}>[source]</a>
           </p>
 
           <div style={{ marginBottom: '20px' }}>
@@ -584,7 +600,7 @@
             </label>
             <div style={{ display: 'flex', gap: '8px' }}>
               {Object.entries(PROVIDERS).map(([id, cfg]) => (
-                <button key={id} onClick={() => { setProvider(id); setApiKey(''); }}
+                <button key={id} onClick={() => { setProvider(id); setApiKey(''); setKeyStatus('idle'); setKeyError(''); }}
                   style={{ padding: '6px 18px', borderRadius: '20px', fontSize: '13px', fontWeight: 600, cursor: 'pointer',
                     border: provider === id ? '2px solid var(--sb-ink)' : '2px solid var(--sb-line)',
                     background: provider === id ? 'var(--sb-ink)' : 'var(--sb-paper)', color: provider === id ? '#fff' : 'var(--sb-ink-2)',
@@ -597,9 +613,29 @@
 
           <div style={{ marginBottom: '20px' }}>
             <label style={{ display: 'block', fontSize: '13px', fontWeight: 600, color: 'var(--sb-ink)', marginBottom: '8px' }}>{p.label} API Key</label>
-            <input type="password" placeholder={p.placeholder} value={apiKey} onChange={e => setApiKey(e.target.value)}
-              style={{ width: '100%', padding: '10px 12px', border: '1px solid var(--sb-line)', borderRadius: '6px', fontSize: '14px', background: 'var(--sb-paper)' }} />
-            <p style={{ fontSize: '12px', color: 'var(--sb-ink-4)', marginTop: '4px' }}>Model: <strong style={{color:'var(--sb-ink-3)'}}>{p.model}</strong> · {p.hint}</p>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input type="password" placeholder={p.placeholder} value={apiKey}
+                onChange={e => { setApiKey(e.target.value); setKeyStatus('idle'); setKeyError(''); }}
+                style={{ flex: 1, padding: '10px 12px', border: '1px solid var(--sb-line)', borderRadius: '6px', fontSize: '14px', background: 'var(--sb-paper)' }} />
+              <button
+                disabled={apiKey.trim().length < 8 || keyStatus === 'checking'}
+                onClick={async () => {
+                  setKeyStatus('checking'); setKeyError('');
+                  try { await checkAPIKey(provider, apiKey); setKeyStatus('ok'); }
+                  catch (e) { setKeyStatus('error'); setKeyError(e.message); }
+                }}
+                style={{ padding: '10px 16px', borderRadius: '6px', fontSize: '13px', fontWeight: 600, whiteSpace: 'nowrap',
+                  border: '1px solid var(--sb-line)', background: 'var(--sb-paper)', color: 'var(--sb-ink-2)',
+                  cursor: apiKey.trim().length < 8 || keyStatus === 'checking' ? 'not-allowed' : 'pointer',
+                  opacity: apiKey.trim().length < 8 ? 0.5 : 1 }}>
+                {keyStatus === 'checking' ? 'Checking…' : 'Check'}
+              </button>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '4px' }}>
+              <p style={{ fontSize: '12px', color: 'var(--sb-ink-4)', margin: 0 }}>Model: <strong style={{color:'var(--sb-ink-3)'}}>{p.model}</strong> · {p.hint}</p>
+              {keyStatus === 'ok'    && <span style={{ fontSize: '12px', color: '#15803d', fontWeight: 600 }}>✓ Valid</span>}
+              {keyStatus === 'error' && <span style={{ fontSize: '12px', color: '#991b1b', maxWidth: '260px', textAlign: 'right' }} title={keyError}>✗ {keyError}</span>}
+            </div>
           </div>
 
           <div style={{ marginBottom: '20px' }}>
